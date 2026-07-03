@@ -91,7 +91,8 @@
     + {
       target: 'memberlist-kv',
       'server.http-listen-port': $._config.server_http_port,
-    },
+    }
+    + (if !$._config.compartments_enabled then {} else $.mimirCompartmentsCommonArgs),
 
   // Zonal memberlist config that must be applied by all zonal deployments.
   local memberlistZoneArgs(zone) = if $._config.memberlist_zone_aware_routing_enabled then {
@@ -217,6 +218,13 @@
     'memberlist_bridge_zone_c_deployment',
   ]),
   assert memberlistBridgeMultiZoneConfigError == null : memberlistBridgeMultiZoneConfigError,
+
+  local memberlistBridgeCompartmentConfigError = if !$._config.compartments_enabled then null else $.validateMimirCompartmentsConfig([
+    'memberlist_bridge_zone_a_deployment',
+    'memberlist_bridge_zone_b_deployment',
+    'memberlist_bridge_zone_c_deployment',
+  ], requireCommonFlags=true),
+  assert memberlistBridgeCompartmentConfigError == null : memberlistBridgeCompartmentConfigError,
 
   //
   // Apply memberlist config to all Mimir components. Single-zone workloads should always connect

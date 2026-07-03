@@ -42,11 +42,37 @@ local isError(err, needle) = err != null && std.length(std.findSubstr(needle, er
 // Synthetic root carrying validateMimirCompartmentsConfig and the resource fields under test. Built
 // from compartments-common alone so the production assertions next to real callers don't fire on the
 // deliberately broken manifests.
-local validate(resources, resourceNames) =
-  (compartmentsCommon { _config+: env._config } + resources).validateMimirCompartmentsConfig(resourceNames);
+local validate(resources, resourceNames, requireCommonFlags=false) =
+  (compartmentsCommon { _config+: env._config } + resources).validateMimirCompartmentsConfig(resourceNames, requireCommonFlags=requireCommonFlags);
+
+local any(values) = std.foldl(function(acc, value) acc || value, values, false);
+local all(values) = std.foldl(function(acc, value) acc && value, values, true);
+local isEmptyObject(value) = std.isObject(value) && std.length(std.objectFields(value)) == 0;
+local resourceContainers(resource) =
+  if resource == null || isEmptyObject(resource) then []
+  else if std.objectHas(resource, 'spec') &&
+          std.objectHas(resource.spec, 'template') &&
+          std.objectHas(resource.spec.template, 'spec') &&
+          std.objectHas(resource.spec.template.spec, 'containers') then
+    resource.spec.template.spec.containers
+  else [];
+local hasAnyRootFlag(resource) =
+  local rootFlagNames = [
+    '-compartments.enabled',
+    '-compartments.read.num-compartments',
+    '-compartments.write.num-compartments',
+  ];
+  any([
+    std.isString(arg) && any([std.startsWith(arg, flag + '=') for flag in rootFlagNames])
+    for container in resourceContainers(resource)
+    if std.objectHas(container, 'args')
+    for arg in container.args
+  ]);
 
 local distributor = env.distributor_zone_a_deployments.compartment_0;  // distributor-zone-a-wc-0
 local ingester = env.ingester_zone_a_statefulsets.compartment_1;  // ingester-zone-a-rc-1
+local compactorScheduler = env.compactor_scheduler_statefulsets.compartment_1;  // compactor-scheduler-rc-1
+local ruler = env.ruler_zone_a_deployment;
 
 // 1. Write compartment whose "distributor.write-compartment-id" doesn't match its name.
 local err1 = validate(
@@ -171,26 +197,134 @@ local err14 = validate(
 assert err14 == null :
        'case 14: expected no error for the matching per-compartment bucket, got: %s' % err14;
 
+// 15. validateBlocksBucket: read compartment without a read-compartment-id flag still validates its bucket
+// against the compartment encoded in the resource name.
+local err15 = validate(
+  { scheduler: overrideContainerArgs(compactorScheduler, ['-blocks-storage.gcs.bucket-name=blocks-bucket-rc-0']) },
+  ['scheduler'],
+);
+assert isError(err15, '-blocks-storage.gcs.bucket-name=blocks-bucket-rc-0') && isError(err15, 'uses its own blocks-storage bucket') :
+       'case 15: expected compactor-scheduler blocks-storage bucket mismatch error, got: %s' % err15;
+
 // A global deployment (no compartment marker) built from the distributor: the Kafka address is reset to the
 // placeholder and the write-compartment-id flag removed, so only the blocks-storage bucket is under test.
 local globalWithBucket(bucket) =
   overrideContainerArgs(
     removeContainerArg(distributor { metadata+: { name: 'querier' } }, '-distributor.write-compartment-id'),
     [
+      '-target=querier',
       '-ingest-storage.kafka.address=' + env._config.compartments_ingest_storage_kafka_address,
       '-blocks-storage.gcs.bucket-name=' + bucket,
     ],
   );
 
-// 15. validateBlocksBucket: global deployment with a concrete per-compartment bucket must be rejected,
+// 16. validateBlocksBucket: global deployment with a concrete per-compartment bucket must be rejected,
 // because one bucket can't serve every read compartment.
-local err15 = validate({ gf: globalWithBucket('blocks-bucket-rc-0') }, ['gf']);
-assert isError(err15, '-blocks-storage.gcs.bucket-name=blocks-bucket-rc-0') && isError(err15, 'only a read compartment owns a dedicated blocks-storage bucket') :
-       'case 15: expected global-deployment blocks-storage bucket error, got: %s' % err15;
+local err16 = validate({ gf: globalWithBucket('blocks-bucket-rc-0') }, ['gf']);
+assert isError(err16, '-blocks-storage.gcs.bucket-name=blocks-bucket-rc-0') && isError(err16, 'only a read compartment owns a dedicated blocks-storage bucket') :
+       'case 16: expected global-deployment blocks-storage bucket error, got: %s' % err16;
 
-// 16. validateBlocksBucket: global deployment keeping the parametrised placeholder is accepted.
-local err16 = validate({ gf: globalWithBucket('blocks-bucket-rc-<read-compartment-id>') }, ['gf']);
-assert err16 == null :
-       'case 16: expected no error for a parametrised blocks-storage bucket on a global deployment, got: %s' % err16;
+// 17. validateBlocksBucket: global deployment keeping the parametrised placeholder is accepted.
+local err17 = validate({ gf: globalWithBucket('blocks-bucket-rc-<read-compartment-id>') }, ['gf']);
+assert err17 == null :
+       'case 17: expected no error for a parametrised blocks-storage bucket on a global deployment, got: %s' % err17;
+
+// 18. Common root flag validation is opt-in: when enabled, missing root flags are rejected.
+local err18 = validate(
+  { dist: removeContainerArg(distributor, '-compartments.enabled') },
+  ['dist'],
+  requireCommonFlags=true,
+);
+assert isError(err18, 'missing "-compartments.enabled=true"') :
+       'case 18: expected missing compartments.enabled error, got: %s' % err18;
+
+// 19. Common root flag validation rejects mismatched compartment counts.
+local err19 = validate(
+  { dist: overrideContainerArgs(distributor, ['-compartments.read.num-compartments=3']) },
+  ['dist'],
+  requireCommonFlags=true,
+);
+assert isError(err19, '-compartments.read.num-compartments=3') && isError(err19, 'compartments require "-compartments.read.num-compartments=2"') :
+       'case 19: expected compartments.read.num-compartments mismatch error, got: %s' % err19;
+
+// 20. A pod-template resource with containers but no Mimir "-target=..." arg fails cleanly.
+local err20 = validate(
+  { dist: removeContainerArg(distributor, '-target') },
+  ['dist'],
+  requireCommonFlags=true,
+);
+assert isError(err20, 'none of them look like a Mimir workload container') :
+       'case 20: expected no-Mimir-container error, got: %s' % err20;
+
+// 21. Existing callers that don't opt into root flag validation keep the previous permissive behavior.
+local err21 = validate(
+  { dist: removeContainerArg(distributor, '-compartments.enabled') },
+  ['dist'],
+);
+assert err21 == null :
+       'case 21: expected no error for missing root flag when root flag validation is disabled, got: %s' % err21;
+
+// 22. Compartment distributors need at least one AZ so the ruler can route to a zone-a service.
+local err22 = (compartmentsCommon {
+                 _config+: env._config {
+                   compartments_distributor_enabled: true,
+                   multi_zone_availability_zones: [],
+                 },
+               }).validateMimirCompartmentsDistributorZones();
+assert isError(err22, 'at least one configured multi_zone_availability_zones entry') :
+       'case 22: expected distributor zone validation error, got: %s' % err22;
+
+// 23. Legacy no-compartments resources used during coexistence must not inherit the compartments root flags.
+local coexistenceEnv = env {
+  _config+:: {
+    no_compartments_distributor_enabled: true,
+    no_compartments_ingester_enabled: true,
+    no_compartments_store_gateway_enabled: true,
+    no_compartments_compactor_enabled: true,
+  },
+};
+local coexistenceResources = [
+  coexistenceEnv.distributor_zone_a_deployment,
+  coexistenceEnv.ingester_zone_a_statefulset,
+  coexistenceEnv.store_gateway_zone_a_statefulset,
+  coexistenceEnv.compactor_statefulset,
+  coexistenceEnv.compactor_scheduler_statefulset,
+];
+assert all([std.length(resourceContainers(resource)) > 0 for resource in coexistenceResources]) :
+       'case 23: expected legacy no-compartments coexistence resources to render with containers';
+assert !any([hasAnyRootFlag(resource) for resource in coexistenceResources]) :
+       'case 23: expected no compartments root flags on legacy no-compartments coexistence resources';
+
+// 24. Missing resource names fail cleanly instead of silently dropping validation coverage.
+local err24 = validate({}, ['missing_resource']);
+assert isError(err24, 'expected root resource "missing_resource"') && isError(err24, 'does not exist') :
+       'case 24: expected missing resource error, got: %s' % err24;
+
+// 25. Compartmented rulers must have a query-frontend address so they don't fall back to local queries.
+local err25 = validate(
+  { ruler: removeContainerArg(ruler, '-ruler.query-frontend.address') },
+  ['ruler'],
+  requireCommonFlags=true,
+);
+assert isError(err25, '-ruler.query-frontend.address') && isError(err25, 'non-empty') :
+       'case 25: expected missing ruler query-frontend address error, got: %s' % err25;
+
+// 26. An empty ruler query-frontend address is equivalent to disabling remote evaluation at runtime.
+local err26 = validate(
+  { ruler: overrideContainerArgs(ruler, ['-ruler.query-frontend.address=']) },
+  ['ruler'],
+  requireCommonFlags=true,
+);
+assert isError(err26, '-ruler.query-frontend.address') && isError(err26, 'non-empty') :
+       'case 26: expected empty ruler query-frontend address error, got: %s' % err26;
+
+// 27. Every component inherits the ingest-storage Kafka settings from the common config, so a global
+// deployment carrying the plain (non-compartment) topic must be rejected.
+local err27 = validate(
+  { ruler: overrideContainerArgs(ruler, ['-ingest-storage.kafka.topic=ingest']) },
+  ['ruler'],
+);
+assert isError(err27, '-ingest-storage.kafka.topic=ingest') && isError(err27, 'must contain the "<read-compartment-id>" placeholder') :
+       'case 27: expected plain Kafka topic on a global deployment to be rejected, got: %s' % err27;
 
 {}

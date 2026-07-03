@@ -49,11 +49,15 @@ local jsonpath = import 'github.com/jsonnet-libs/xtd/jsonpath.libsonnet';
     else if $._config.storage_backend == 'azure' then 'blocks-storage.azure.container-name'
     else error 'compartments do not support the "%s" storage backend' % $._config.storage_backend,
 
-  // Common CLI args shared by every compartment-aware Mimir component.
-  mimirCompartmentsCommonArgs:: {
+  // Root CLI args shared by every compartment-aware Mimir component.
+  mimirCompartmentsRootArgs:: {
     'compartments.enabled': true,
     'compartments.read.num-compartments': $._config.compartments_read_count,
     'compartments.write.num-compartments': $._config.compartments_write_count,
+  },
+
+  // Common CLI args shared by compartment-aware Mimir components that consume or produce ingest-storage data.
+  mimirCompartmentsCommonArgs:: $.mimirCompartmentsRootArgs {
     'ingest-storage.kafka.topic': $._config.compartments_ingest_storage_kafka_topic,
   },
 
@@ -82,13 +86,26 @@ local jsonpath = import 'github.com/jsonnet-libs/xtd/jsonpath.libsonnet';
   blocks_chunks_zone_b_caching_configs:: $.mimirCompartmentsCreateIf(true, $._config.compartments_read_count, function(c) {}),
   blocks_chunks_zone_c_caching_configs:: $.mimirCompartmentsCreateIf(true, $._config.compartments_read_count, function(c) {}),
 
+  validateMimirCompartmentsDistributorZones()::
+    if !$._config.compartments_distributor_enabled || std.length($._config.multi_zone_availability_zones) >= 1 then
+      null
+    else
+      'compartments_distributor_enabled requires at least one configured multi_zone_availability_zones entry',
+
   // Validates that per-compartment Deployments/StatefulSets configuration options are correctly
   // parameterised for the compartment they belong to.
-  validateMimirCompartmentsConfig(resourceNames)::
+  validateMimirCompartmentsConfig(resourceNames, requireCommonFlags=false)::
     local root = $;
+    local targetFlag = '-target';
+    local rootFlags = [
+      { flag: '-compartments.enabled', value: std.toString(root.mimirCompartmentsRootArgs['compartments.enabled']) },
+      { flag: '-compartments.read.num-compartments', value: std.toString(root.mimirCompartmentsRootArgs['compartments.read.num-compartments']) },
+      { flag: '-compartments.write.num-compartments', value: std.toString(root.mimirCompartmentsRootArgs['compartments.write.num-compartments']) },
+    ];
     local addressFlag = '-ingest-storage.kafka.address';
     local topicFlag = '-ingest-storage.kafka.topic';
     local blocksBucketFlag = '-' + root.mimirBlocksStorageBucketNameFlag;
+    local rulerQueryFrontendAddressFlag = '-ruler.query-frontend.address';
     local writeIdSuffix = '.write-compartment-id';
     local readIdSuffix = '.read-compartment-id';
     local writePlaceholder = '<write-compartment-id>';
@@ -149,9 +166,28 @@ local jsonpath = import 'github.com/jsonnet-libs/xtd/jsonpath.libsonnet';
           local eq = std.findSubstr('=', arg)[0];
           { flag: std.substr(arg, 0, eq), value: std.substr(arg, eq + 1, std.length(arg) - eq - 1) };
 
+    local hasTarget(container, target) =
+      local value = flagValue(container, targetFlag);
+      value != null && std.member(std.split(value, ','), target);
+
+    local usesCompartmentKafkaAddress(container) =
+      local kafkaAddressTargets = [
+        'distributor',
+        'ingester',
+        'query-frontend',
+        'ruler',
+        'ruler-query-frontend',
+        'compactor',
+        'compactor-scheduler',
+        'store-gateway',
+      ];
+      std.foldl(function(found, target) found || hasTarget(container, target), kafkaAddressTargets, false);
+
     local validateKafkaAddress(name, compartment, container) =
       local value = flagValue(container, addressFlag);
       if value == null then
+        null
+      else if !usesCompartmentKafkaAddress(container) then
         null
       else if compartment.kind == 'write' then
         if std.length(std.findSubstr(writePlaceholder, value)) > 0 then
@@ -194,6 +230,8 @@ local jsonpath = import 'github.com/jsonnet-libs/xtd/jsonpath.libsonnet';
       local value = flagValue(container, blocksBucketFlag);
       if value == null then
         null
+      else if compartment.kind != 'read' && !hasTarget(container, 'querier') && !hasTarget(container, 'ruler-querier') then
+        null
       else if std.length(std.findSubstr(readPlaceholder, value)) > 0 then
         null
       else if compartment.kind == 'read' then
@@ -203,6 +241,15 @@ local jsonpath = import 'github.com/jsonnet-libs/xtd/jsonpath.libsonnet';
           null
       else
         'The Deployment or StatefulSet "%s" sets "%s=%s", but only a read compartment owns a dedicated blocks-storage bucket, so a bucket name here must contain the "%s" placeholder to address every read compartment.' % [name, blocksBucketFlag, value, readPlaceholder];
+
+    local validateRulerRemoteEvaluation(name, compartment, container) =
+      local value = flagValue(container, rulerQueryFrontendAddressFlag);
+      if !hasTarget(container, 'ruler') then
+        null
+      else if value == null || value == '' then
+        'The Deployment or StatefulSet "%s" runs "%s=%s", but compartments require a non-empty "%s=..." so the ruler evaluates queries through the ruler query-frontend.' % [name, targetFlag, flagValue(container, targetFlag), rulerQueryFrontendAddressFlag]
+      else
+        null;
 
     // A "<kind>-compartment-id" flag must appear only on a matching compartment, and its value must
     // equal the id encoded in the resource name.
@@ -223,12 +270,37 @@ local jsonpath = import 'github.com/jsonnet-libs/xtd/jsonpath.libsonnet';
     local validateReadCompartmentId(name, compartment, container) =
       validateCompartmentId(name, compartment, container, readIdSuffix, 'read');
 
-    local validateContainer(name, compartment, container) =
+    local validateRootFlag(name, container, expected) =
+      local value = flagValue(container, expected.flag);
+      if value == null then
+        'The Deployment or StatefulSet "%s" is missing "%s=%s" on the Mimir container with "%s=%s".' % [name, expected.flag, expected.value, targetFlag, flagValue(container, targetFlag)]
+      else if value != expected.value then
+        'The Deployment or StatefulSet "%s" sets "%s=%s", but compartments require "%s=%s" on every Mimir container.' % [name, expected.flag, value, expected.flag, expected.value]
+      else
+        null;
+
+    local validateRootFlags(name, container) =
       std.foldl(
-        function(firstError, validator) if firstError != null then firstError else validator(name, compartment, container),
-        [validateKafkaAddress, validateKafkaTopic, validateBlocksBucket, validateWriteCompartmentId, validateReadCompartmentId],
+        function(firstError, expected) if firstError != null then firstError else validateRootFlag(name, container, expected),
+        rootFlags,
         null
       );
+
+    local isMimirContainer(container) =
+      flagValue(container, targetFlag) != null;
+
+    local validateContainer(name, compartment, container) =
+      local compartmentError = std.foldl(
+        function(firstError, validator) if firstError != null then firstError else validator(name, compartment, container),
+        [validateKafkaAddress, validateKafkaTopic, validateBlocksBucket, validateRulerRemoteEvaluation, validateWriteCompartmentId, validateReadCompartmentId],
+        null
+      );
+      if compartmentError != null then
+        compartmentError
+      else if requireCommonFlags && isMimirContainer(container) then
+        validateRootFlags(name, container)
+      else
+        null;
 
     local validateResource(resource) =
       if resource == null then
@@ -237,11 +309,18 @@ local jsonpath = import 'github.com/jsonnet-libs/xtd/jsonpath.libsonnet';
         local name = resource.metadata.name;
         local compartment = extractCompartment(name);
         local containers = jsonpath.getJSONPath(resource, 'spec.template.spec.containers', []);
-        std.foldl(
+        local containerError = std.foldl(
           function(firstError, container) if firstError != null then firstError else validateContainer(name, compartment, container),
           containers,
           null
         );
+        local mimirContainers = std.filter(isMimirContainer, containers);
+        if containerError != null then
+          containerError
+        else if requireCommonFlags && std.length(containers) > 0 && std.length(mimirContainers) == 0 then
+          'The Deployment or StatefulSet "%s" has containers but none of them look like a Mimir workload container with a "%s=..." CLI arg.' % [name, targetFlag]
+        else
+          null;
 
     local getResourceName(value) =
       if std.isObject(value) && std.objectHas(value, 'metadata') && std.objectHas(value.metadata, 'name') then value.metadata.name else null;
@@ -259,7 +338,10 @@ local jsonpath = import 'github.com/jsonnet-libs/xtd/jsonpath.libsonnet';
         null;
 
     std.foldl(
-      function(firstError, resourceName) if firstError != null then firstError else validateResourceSet(root[resourceName]),
+      function(firstError, resourceName)
+        if firstError != null then firstError
+        else if !std.objectHas(root, resourceName) then 'validateMimirCompartmentsConfig expected root resource "%s", but it does not exist.' % resourceName
+        else validateResourceSet(root[resourceName]),
       resourceNames,
       null
     ),

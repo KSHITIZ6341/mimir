@@ -19,7 +19,7 @@
 
   // Args.
   compactor_scheduler_compartments_args:: $.mimirCompartmentsCreateIf(isEnabled, numCompartments, function(compartmentIdx)
-    $.compactor_scheduler_args {
+    $.compactor_scheduler_args + $.mimirCompartmentsRootArgs {
       [$.mimirBlocksStorageBucketNameFlag]: $.mimirBlocksStorageCompartmentBucketName(compartmentIdx),
 
       // The scheduler doesn't consume Kafka, but it inherits the ingest-storage args from the common config,
@@ -60,6 +60,6 @@
   compactor_scheduler_pdb: if isEnabled && !isNoCompartmentsEnabled then null else super.compactor_scheduler_pdb,
 
   // Config validation.
-  local schedulerCompartmentConfigError = $.validateMimirCompartmentsConfig(['compactor_scheduler_statefulsets']),
+  local schedulerCompartmentConfigError = $.validateMimirCompartmentsConfig(['compactor_scheduler_statefulsets'], requireCommonFlags=true),
   assert schedulerCompartmentConfigError == null : schedulerCompartmentConfigError,
 }

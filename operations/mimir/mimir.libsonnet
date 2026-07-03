@@ -65,6 +65,7 @@
 // because it overrides their components and builds on their helpers.
 (import 'compartments-common.libsonnet') +
 (import 'compartments-distributor.libsonnet') +
+(import 'compartments-ruler.libsonnet') +
 (import 'compartments-ingester.libsonnet') +
 (import 'compartments-querier.libsonnet') +
 (import 'compartments-query-frontend.libsonnet') +
@@ -72,6 +73,7 @@
 (import 'compartments-compactor-scheduler.libsonnet') +
 (import 'compartments-store-gateway.libsonnet') +
 (import 'compartments-memcached.libsonnet') +
+(import 'compartments-global.libsonnet') +
 
 // Store-gateway autoscaling. Keep it after multi-zone-store-gateway (it patches those StatefulSets) and after
 // compartments-store-gateway so it can layer the same autoscaling onto the per-compartment StatefulSet maps.

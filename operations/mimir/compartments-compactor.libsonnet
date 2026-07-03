@@ -27,10 +27,7 @@
 
   // Args.
   compactor_compartments_args:: $.mimirCompartmentsCreateIf(isEnabled, numCompartments, function(compartmentIdx)
-    $.compactor_args + compartmentBlocksBucketArg(compartmentIdx) {
-      'compartments.enabled': true,
-      'compartments.read.num-compartments': $._config.compartments_read_count,
-      'compartments.write.num-compartments': $._config.compartments_write_count,
+    $.compactor_args + $.mimirCompartmentsRootArgs + compartmentBlocksBucketArg(compartmentIdx) {
       'compactor.read-compartment-id': compartmentIdx,
 
       // The compactor doesn't consume Kafka, but it inherits the ingest-storage args from the common config,
@@ -95,6 +92,6 @@
     else super.compactor_scaled_object,
 
   // Config validation.
-  local compactorCompartmentConfigError = $.validateMimirCompartmentsConfig(['compactor_statefulsets']),
+  local compactorCompartmentConfigError = $.validateMimirCompartmentsConfig(['compactor_statefulsets'], requireCommonFlags=true),
   assert compactorCompartmentConfigError == null : compactorCompartmentConfigError,
 }

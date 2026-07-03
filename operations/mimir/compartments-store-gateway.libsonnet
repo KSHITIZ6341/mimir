@@ -38,9 +38,6 @@
   local perCompartmentStoreGatewayArgs(compartmentIdx) = {
     [$.mimirBlocksStorageBucketNameFlag]: $.mimirBlocksStorageCompartmentBucketName(compartmentIdx),
 
-    'compartments.enabled': true,
-    'compartments.read.num-compartments': $._config.compartments_read_count,
-    'compartments.write.num-compartments': $._config.compartments_write_count,
     'store-gateway.read-compartment-id': compartmentIdx,
 
     // The store-gateway doesn't consume Kafka, but it inherits the ingest-storage args from the common config,
@@ -48,7 +45,7 @@
     // validation passes).
     'ingest-storage.kafka.address': $._config.compartments_ingest_storage_kafka_address,
     'ingest-storage.kafka.topic': $.mimirIngestStorageCompartmentKafkaTopic(compartmentIdx),
-  },
+  } + $.mimirCompartmentsRootArgs,
 
   store_gateway_zone_a_compartments_args:: $.mimirCompartmentsCreateIf(isEnabled && isZoneAEnabled, numCompartments, function(c) $.store_gateway_zone_a_args + perCompartmentStoreGatewayArgs(c) + $.blocks_chunks_zone_a_caching_configs['compartment_%d' % c]),
   store_gateway_zone_b_compartments_args:: $.mimirCompartmentsCreateIf(isEnabled && isZoneBEnabled, numCompartments, function(c) $.store_gateway_zone_b_args + perCompartmentStoreGatewayArgs(c) + $.blocks_chunks_zone_b_caching_configs['compartment_%d' % c]),
@@ -162,6 +159,6 @@
     'store_gateway_zone_c_statefulsets',
     'store_gateway_zone_a_backup_statefulsets',
     'store_gateway_zone_b_backup_statefulsets',
-  ]),
+  ], requireCommonFlags=true),
   assert storeGatewayCompartmentConfigError == null : storeGatewayCompartmentConfigError,
 }

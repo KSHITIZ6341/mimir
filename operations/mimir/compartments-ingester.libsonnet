@@ -186,6 +186,6 @@
     'ingester_zone_a_statefulsets',
     'ingester_zone_b_statefulsets',
     'ingester_zone_c_statefulsets',
-  ]),
+  ], requireCommonFlags=true),
   assert ingesterCompartmentConfigError == null : ingesterCompartmentConfigError,
 }
