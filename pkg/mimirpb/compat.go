@@ -113,9 +113,9 @@ func FromLabelAdaptersToMetric(ls []LabelAdapter) model.Metric {
 func FromLabelAdaptersToKeyString(ls []LabelAdapter) string {
 	buf := make([]byte, 0, 1024)
 	for i := range ls {
-		buf = append(buf, '\xff')
+		buf = append(buf, '\x00')
 		buf = append(buf, ls[i].Name...)
-		buf = append(buf, '\xff')
+		buf = append(buf, '\x00')
 		buf = append(buf, ls[i].Value...)
 	}
 	return string(buf)
